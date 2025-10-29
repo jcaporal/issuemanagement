@@ -1,0 +1,536 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Issue Management: The Leader's Resolution Blueprint</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link href="https://fonts.googleapis.com/css2?family=Lora:ital,wght@0,400..700;1,400..700&family=Poppins:wght@400;600;700;800&display=swap" rel="stylesheet">
+    <script type="module">
+        import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
+        import { getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
+        import { getFirestore, doc, addDoc, updateDoc, deleteDoc, onSnapshot, collection, query, setLogLevel, serverTimestamp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+
+        // --- Global Firebase & Auth Variables ---
+        // MANDATORY: Global variables provided by the execution environment
+        const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
+        const firebaseConfig = JSON.parse(typeof __firebase_config !== 'undefined' ? __firebase_config : '{}');
+        const initialAuthToken = typeof __initial_auth_token !== 'undefined' ? __initial_auth_token : null;
+
+        // Internal state
+        let db;
+        let auth;
+        let userId = null;
+        let isAuthReady = false;
+        let hasLoadedOnce = false;
+
+        // --- Utility Functions ---
+
+        const getIssueCollectionPath = () => `/artifacts/${appId}/users/${userId}/issues`;
+
+        function hideLoader() {
+            const loader = document.getElementById('loadingIndicator');
+            if (loader) {
+                loader.classList.add('hidden');
+            }
+        }
+
+        // --- CORE FIREBASE LOGIC ---
+
+        async function initializeAppAndAuth() {
+            try {
+                const app = initializeApp(firebaseConfig);
+                db = getFirestore(app);
+                auth = getAuth(app);
+                
+                setLogLevel('error'); // Set log level to reduce console spam
+
+                // Sign in logic
+                if (initialAuthToken) {
+                    await signInWithCustomToken(auth, initialAuthToken);
+                } else {
+                    await signInAnonymously(auth);
+                }
+
+                // Auth state listener
+                onAuthStateChanged(auth, (user) => {
+                    if (user) {
+                        userId = user.uid;
+                    } else {
+                        // Fallback for anonymous ID if auth fails unexpectedly
+                        userId = 'anonymous-' + (crypto.randomUUID ? crypto.randomUUID() : Math.random().toString(36).substring(2));
+                    }
+                    isAuthReady = true;
+                    // Start listening for issues once auth is ready
+                    startIssueListener(); 
+                });
+
+            } catch (error) {
+                console.error("Firebase Initialization or Auth Error:", error);
+                document.getElementById('loadingMessage').textContent = 'Error: Failed to initialize. Check console.';
+                hideLoader();
+            }
+        }
+
+        function startIssueListener() {
+            if (!db || !userId) return;
+
+            const issuesRef = collection(db, getIssueCollectionPath());
+            
+            const q = query(issuesRef); 
+
+            onSnapshot(q, (snapshot) => {
+                const issues = snapshot.docs.map(doc => ({
+                    id: doc.id,
+                    ...doc.data()
+                }));
+                
+                // In-memory sorting by createdAt (descending)
+                issues.sort((a, b) => (b.createdAt?.toMillis() || 0) - (a.createdAt?.toMillis() || 0));
+
+                renderIssueRegister(issues);
+
+                if (!hasLoadedOnce) {
+                    hasLoadedOnce = true;
+                    hideLoader(); // Hide loader after first successful data load
+                }
+
+            }, (error) => {
+                console.error("Firestore Listener Error:", error);
+            });
+        }
+
+        async function addIssue(event) {
+            event.preventDefault();
+            if (!db || !userId) return;
+
+            const form = event.target;
+            const type = form.issueType.value;
+            const description = form.description.value.trim();
+            const action = form.action.value.trim();
+            const owner = form.owner.value.trim();
+            const status = form.status.value;
+
+            // Using a custom modal/message box instead of alert()
+            const messageBox = document.getElementById('formValidationMessage');
+            if (!type || !description || !action || !owner) {
+                messageBox.textContent = 'Please fill out all fields for the new issue.';
+                messageBox.classList.remove('hidden');
+                return;
+            }
+            messageBox.classList.add('hidden'); // Clear previous messages
+
+            try {
+                const issuesRef = collection(db, getIssueCollectionPath());
+                await addDoc(issuesRef, {
+                    type,
+                    description,
+                    action,
+                    owner,
+                    status,
+                    createdAt: serverTimestamp()
+                });
+                form.reset();
+            } catch (e) {
+                console.error("Error adding document: ", e);
+            }
+        }
+
+        async function updateIssueStatus(issueId, newStatus) {
+            if (!db || !userId) return;
+            try {
+                const issueRef = doc(db, getIssueCollectionPath(), issueId);
+                await updateDoc(issueRef, { status: newStatus });
+            } catch (e) {
+                console.error("Error updating document: ", e);
+            }
+        }
+
+        async function deleteIssue(issueId) {
+            if (!db || !userId) return;
+            // In a real application, you would use a confirmation modal here.
+            // For this environment, we'll proceed with deletion.
+            try {
+                const issueRef = doc(db, getIssueCollectionPath(), issueId);
+                await deleteDoc(issueRef);
+            } catch (e) {
+                console.error("Error deleting document: ", e);
+            }
+        }
+
+        // --- UI Rendering Functions ---
+
+        function renderIssueRegister(issues) {
+            const registerBody = document.getElementById('issueRegisterBody');
+            registerBody.innerHTML = '';
+            
+            if (issues.length === 0) {
+                registerBody.innerHTML = `<tr><td colspan="5" class="p-4 text-center font-lora italic text-gray-500">No issues tracked yet. Add your first Problem or Advantage above!</td></tr>`;
+                return;
+            }
+
+            issues.forEach(issue => {
+                const typeClass = issue.type === 'Problem' ? 'bg-danger/20 text-danger border-danger/50' : 'bg-opportunity/20 text-yellow-600 border-yellow-600/50';
+                const statusClass = issue.status === 'Resolved' ? 'bg-green-100 text-green-700 font-semibold' : (issue.status === 'In Progress' ? 'bg-primary/20 text-primary font-semibold' : 'bg-gray-200 text-dark font-semibold');
+
+                const row = document.createElement('tr');
+                row.className = 'border-b hover:bg-light-branded transition-colors';
+                row.innerHTML = `
+                    <td class="p-3 font-poppins font-semibold text-sm ${typeClass} border-r-4 border-l-4 rounded-lg">${issue.type}</td>
+                    <td class="p-3 font-lora">${issue.description}</td>
+                    <td class="p-3 font-lora">${issue.action}</td>
+                    <td class="p-3 font-poppins">${issue.owner}</td>
+                    <td class="p-3">
+                        <select onchange="window.updateIssueStatus('${issue.id}', this.value)" class="p-1 text-sm rounded-lg ${statusClass} border border-dark/20 font-poppins">
+                            <option value="Identified" ${issue.status === 'Identified' ? 'selected' : ''}>Identified</option>
+                            <option value="In Progress" ${issue.status === 'In Progress' ? 'selected' : ''}>In Progress</option>
+                            <option value="Resolved" ${issue.status === 'Resolved' ? 'selected' : ''}>Resolved</option>
+                        </select>
+                        <button onclick="window.deleteIssue('${issue.id}')" class="ml-2 text-danger hover:text-danger/70 transition-colors" title="Delete Issue">
+                            <svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5 inline-block" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
+                                <path stroke-linecap="round" stroke-linejoin="round" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
+                            </svg>
+                        </button>
+                    </td>
+                `;
+                registerBody.appendChild(row);
+            });
+        }
+
+        // --- Setup on Load ---
+        document.addEventListener('DOMContentLoaded', () => {
+            initializeAppAndAuth();
+            
+            // Expose functions globally for event handlers in the HTML
+            window.updateIssueStatus = updateIssueStatus;
+            window.deleteIssue = deleteIssue;
+            
+            // Attach form submission handler
+            document.getElementById('addIssueForm').addEventListener('submit', addIssue);
+        });
+
+    </script>
+    <style>
+        /* Define the color palette */
+        :root {
+            --color-dark: #1d364e; /* Dark Blue */
+            --color-primary: #50b3db; /* Light Blue (Used for positive framing/structure) */
+            --color-danger: #e83760; /* Red/Pink (Used for Problems) */
+            --color-opportunity: #ffda3c; /* Yellow/Gold (Used for Advantages) */
+            --color-light: #f2efeb; /* Off-White */
+        }
+        .font-poppins { font-family: 'Poppins', sans-serif; }
+        .font-lora { font-family: 'Lora', serif; }
+
+        /* Custom utility classes based on the palette */
+        .bg-dark { background-color: var(--color-dark); }
+        .text-dark { color: var(--color-dark); }
+        .bg-primary { background-color: var(--color-primary); }
+        .text-primary { color: var(--color-primary); }
+        .bg-danger { background-color: var(--color-danger); }
+        .text-danger { color: var(--color-danger); }
+        .bg-opportunity { background-color: var(--color-opportunity); }
+        .text-opportunity { color: var(--color-opportunity); }
+        .bg-light-branded { background-color: var(--color-light); } /* Use branded light color for cards */
+        .border-dark { border-color: var(--color-dark); }
+        .shadow-lg-dark { box-shadow: 0 10px 15px -3px rgba(29, 54, 78, 0.1), 0 4px 6px -2px rgba(29, 54, 78, 0.05); }
+
+        /* Generic Card Styling */
+        .module-card {
+            padding: 1.5rem;
+            border-radius: 1rem;
+            margin-bottom: 1.5rem;
+            transition: transform 0.3s ease, box-shadow 0.3s ease;
+        }
+        .form-radio {
+            color: var(--color-primary);
+            border-radius: 9999px;
+            border-width: 2px;
+            border-color: var(--color-dark);
+            width: 1.25rem;
+            height: 1.25rem;
+            transition: all 0.2s ease;
+        }
+        .form-radio:checked {
+            background-color: var(--color-primary);
+            border-color: var(--color-primary);
+        }
+        input[type="radio"].text-danger:checked {
+            background-color: var(--color-danger);
+            border-color: var(--color-danger);
+        }
+        input[type="radio"].text-opportunity:checked {
+            background-color: var(--color-opportunity);
+            border-color: var(--color-opportunity);
+        }
+
+    </style>
+</head>
+<body class="bg-gray-50 min-h-screen p-4 sm:p-8 font-lora text-dark relative"> <!-- PRIMARY FONT: LORA -->
+
+    <!-- Loading Indicator -->
+    <div id="loadingIndicator" class="fixed inset-0 bg-gray-50 flex items-center justify-center z-50 transition-opacity duration-300">
+        <p id="loadingMessage" class="text-xl font-poppins text-dark flex items-center">
+            <svg class="animate-spin -ml-1 mr-3 h-5 w-5 text-dark" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+                <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
+                <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+            </svg>
+            Loading Issue Register...
+        </p>
+    </div>
+
+    <div class="max-w-4xl mx-auto">
+        <!-- Header -->
+        <header class="text-center py-6 sm:py-10 mb-8 bg-dark text-white rounded-2xl shadow-lg-dark">
+            <h1 class="text-3xl sm:text-5xl font-extrabold tracking-tight font-poppins"> <!-- SECONDARY FONT: POPPINS -->
+                Issue Management for Leaders
+            </h1>
+            <p class="mt-2 text-xl font-semibold opacity-90 font-lora"> <!-- PRIMARY FONT: LORA -->
+                Moving from Uncertainty to Confident Resolution
+            </p>
+        </header>
+
+        <!-- Introduction -->
+        <div class="module-card bg-light-branded shadow-lg border-t-4 border-primary">
+            <h2 class="text-2xl font-bold text-dark mb-4 border-b pb-2 font-lora">Mastering Certainty: The Leader's Edge in Issue Management</h2> <!-- PRIMARY FONT: LORA -->
+            <p class="font-lora text-lg">
+                Your role as a leader is defined by your ability to navigate reality. An <strong>Issue</strong> is simply a situation that has passed the point of uncertainty. It is <strong>certain</strong>, and its effects are already measurable. While risks require planning for the <em>unknown</em>, issues demand direct, immediate <strong>resolution</strong> of the <em>known</em>. This module moves you beyond theory and equips you with the framework to handle these certainties—whether they are challenging <strong>Problems</strong> or surprising <strong>Advantages</strong>.
+            </p>
+        </div>
+
+        <!-- Section 1: The 2D Issue Concept (In-depth) -->
+        <section class="mb-8">
+            <h2 class="text-3xl font-extrabold text-dark mb-6 font-poppins flex items-center"> 
+                <svg class="w-8 h-8 mr-3 text-primary" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
+                    <path stroke-linecap="round" stroke-linejoin="round" d="M9 12l2 2 4-4m5.618-4.016A11.955 11.955 0 0112 2.944a11.955 11.955 0 01-9.618 3.04A12.003 12.003 0 0012 21c3.678 0 7.037-1.42 9.618-3.796A12.003 12.003 0 0112 3z" />
+                </svg>
+                The Foundational Framework: Issues Are Two-Dimensional
+            </h2>
+            
+            <p class="font-lora mb-4 text-lg">
+                Unlike a risk, which is a three-dimensional concept (Situation, Likelihood, Impact), an issue is the <strong>limiting case</strong> where Likelihood collapses to 100%. This leaves us with two critical dimensions you must manage: the event itself and its consequence on your <strong>project goals</strong>.
+            </p>
+
+            <div class="grid grid-cols-1 md:grid-cols-2 gap-6">
+                <!-- Dimension 1: Situation (In-depth) -->
+                <div class="module-card bg-primary text-white shadow-lg">
+                    <div class="flex items-center mb-2">
+                        <!-- New Icon: Clock/Calendar for "Known to have Occurred" -->
+                        <svg class="w-8 h-8 mr-3 text-white" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
+                            <path stroke-linecap="round" stroke-linejoin="round" d="M8 7V3m8 4V3m-4 4h.01M12 4v4m0 4v4m0 4v.01M3 15h18M5 5h14a2 2 0 012 2v10a2 2 0 01-2 2H5a2 2 0 01-2-2V7a2 2 0 012-2z" />
+                        </svg>
+                        <h3 class="text-xl font-semibold font-poppins">Dimension 1: The Situation (The Event)</h3>
+                    </div>
+                    <p class="font-lora text-base">This is the <strong>root cause</strong>—the event or set of conditions that is <strong>known to have occurred</strong>. Defining the situation clearly, using a meta-language like: "Given that <em>[situation has occurred]</em>, the status is <em>[brief description]</em>," ensures the entire team is aligned on the core reality. Your primary management goal here is to influence the <strong>source</strong> of the event itself.</p>
+                </div>
+
+                <!-- Dimension 2: Impact (In-depth) -->
+                <div class="module-card bg-light-branded text-dark shadow-lg border-2 border-primary">
+                    <div class="flex items-center mb-2">
+                        <!-- New Icon: Target/Bullseye for "Measurable Result on Goals" -->
+                        <svg class="w-8 h-8 mr-3 text-danger" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
+                            <path stroke-linecap="round" stroke-linejoin="round" d="M9 19V6l12-3v16l-12 3m0-13l12-3m-12 3v13" />
+                        </svg>
+                        <h3 class="text-xl font-semibold font-poppins">Dimension 2: The Impact (The Consequence)</h3>
+                    </div>
+                    <p class="font-lora text-base">This is the <strong>measurable result</strong> of the situation on the project's success metrics. This result is defined against the <strong>triple constraint</strong> (Time, Cost, Scope) and adherence to <strong>Constraints</strong>. By focusing on the impact, you move the conversation away from blame and toward measurable, action-oriented responses to protect or enhance project value.</p>
+                </div>
+            </div>
+            
+            <!-- Dual Nature of Issues (In-depth) -->
+            <div class="mt-6 p-4 rounded-lg bg-light-branded shadow-inner border border-gray-300">
+                <p class="font-lora text-lg font-bold border-b-2 border-primary pb-2 flex items-center"> 
+                    <svg class="w-5 h-5 mr-2 text-dark" fill="currentColor" viewBox="0 0 20 20"><path d="M10 2a8 8 0 100 16A8 8 0 0010 2zm1 11a1 1 0 11-2 0 1 1 0 012 0zm0-7a1 1 0 010 2v3a1 1 0 11-2 0V8a1 1 0 012 0z"></path></svg>
+                    The Dual Nature: Problems vs. Advantages
+                </p>
+                <p class="font-lora text-base mt-2">
+                    Effective issue management requires leaders to recognize that not all issues are negative. Just as risks can be threats or opportunities, issues can create two distinct paths for leadership action:
+                </p>
+                <ul class="list-disc ml-8 mt-3 text-lg space-y-2 font-poppins">
+                    <li class="text-danger font-semibold"><span class="text-dark">Problem:</span> A situation with a <strong>negative impact</strong>. Your focus shifts entirely to <strong>mitigation</strong> and <strong>containment</strong> to keep the project on track.</li>
+                    <li class="text-yellow-600 font-semibold"><span class="text-dark">Advantage:</span> A situation with a <strong>positive impact</strong>. Your focus is on <strong>maximization</strong> and <strong>integration</strong> to ensure the gain is realized for the project.</li>
+                </ul>
+            </div>
+        </section>
+        
+        <!-- New Deep Dive Section: Action Categories -->
+        <section class="mb-8">
+            <h2 class="text-3xl font-extrabold text-dark mb-6 font-poppins flex items-center"> 
+                <svg class="w-8 h-8 mr-3 text-danger" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
+                    <path stroke-linecap="round" stroke-linejoin="round" d="M13 10V3L4 14h7v7l9-11h-7z" />
+                </svg>
+                Strategic Issue Action Planning
+            </h2>
+            <p class="font-lora mb-4 text-lg">
+                Once an issue is certain, your leadership action is focused on two intervention points: <strong>The Source (Situation)</strong> or <strong>The Consequence (Impact)</strong>. This focused approach simplifies decision-making and allows for swift response, as outlined in the action categories below:
+            </p>
+            
+            <div class="grid grid-cols-1 md:grid-cols-2 gap-6">
+                
+                <!-- Action Target 1: The Situation (Source) -->
+                <div class="module-card bg-dark text-white shadow-lg border-b-4 border-primary">
+                    <h3 class="text-xl font-semibold font-poppins mb-3 border-b border-white/30 pb-2 flex items-center">
+                        <svg class="w-6 h-6 mr-2 text-primary" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
+                            <path stroke-linecap="round" stroke-linejoin="round" d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z" />
+                            <path stroke-linecap="round" stroke-linejoin="round" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
+                        </svg>
+                        Target 1: The Situation (Source)
+                    </h3>
+                    <p class="font-lora italic text-sm mb-4 opacity-80">Actions aimed at fixing the root cause itself.</p>
+                    
+                    <ul class="list-disc ml-6 space-y-2 font-lora text-base">
+                        <li><strong>For a Problem (Negative):</strong> <strong>Adapt</strong> or <strong>Reassign</strong>. This means taking corrective measures to resolve the event (e.g., <em>mediating a conflict</em>) or replacing the resource/process causing the issue.</li>
+                        <li><strong>For an Advantage (Positive):</strong> <strong>Improve</strong>. This means taking specific steps to ensure the positive situation is fully realized and secured (e.g., <em>making the available resource permanent</em>).</li>
+                    </ul>
+                </div>
+                
+                <!-- Action Target 2: The Impact (Consequence) -->
+                <div class="module-card bg-light-branded text-dark shadow-lg border-2 border-danger">
+                    <h3 class="text-xl font-semibold font-poppins mb-3 border-b border-gray-300 pb-2 flex items-center">
+                        <svg class="w-6 h-6 mr-2 text-danger" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
+                            <path stroke-linecap="round" stroke-linejoin="round" d="M9 12l2 2 4-4m5.618-4.016A11.955 11.955 0 0112 2.944a11.955 11.955 0 01-9.618 3.04A12.003 12.003 0 0012 21c3.678 0 7.037-1.42 9.618-3.796A12.003 12.003 0 0112 3z" />
+                        </svg>
+                        Target 2: The Impact (Consequence)
+                    </h3>
+                    <p class="font-lora italic text-sm mb-4 text-gray-700">Actions aimed at protecting the project's objectives from the effects.</p>
+                    
+                    <ul class="list-disc ml-6 space-y-2 font-lora text-base">
+                        <li><strong>For a Problem (Negative):</strong> <strong>Shift</strong>. This involves changing the project plan to absorb the impact (e.g., <em>extending the deadline, securing contingency funding</em>). This is a purely reactive measure to protect the project.</li>
+                        <li><strong>For an Advantage (Positive):</strong> <strong>Capture</strong> or <strong>Augment</strong>. This means formally realizing the benefit into the plan (Capture, e.g., <em>updating the schedule</em>) or increasing the positive outcome (Augment, e.g., <em>client upsell or bonus negotiation</em>).</li>
+                    </ul>
+                </div>
+            </div>
+            
+        </section>
+
+        <!-- Section 2: Interactive Issue Register -->
+        <section class="mb-8">
+            <h2 class="text-3xl font-extrabold text-dark mb-6 border-b-4 border-danger pb-3 font-poppins flex items-center"> 
+                <svg class="w-8 h-8 mr-3 text-dark" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
+                    <path stroke-linecap="round" stroke-linejoin="round" d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2m-3 7h3m-3 4h3m-6-4h.01M9 16h.01" />
+                </svg>
+                Hands-On Lab: Your Real-Time Issue Register
+            </h2>
+
+            <!-- New Issue Form -->
+            <form id="addIssueForm" class="module-card bg-light-branded shadow-lg border-2 border-dark">
+                <p class="font-bold mb-4 text-lg font-poppins border-b pb-2">Add a New Issue for Tracking</p>
+                
+                <div id="formValidationMessage" class="hidden bg-danger/10 text-danger p-2 mb-3 rounded font-poppins text-sm font-semibold"></div>
+                
+                <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+                    <!-- Type Selector -->
+                    <div>
+                        <label class="block font-semibold mb-1 text-sm font-poppins">Issue Type</label>
+                        <select name="issueType" class="w-full p-2 border rounded-lg font-lora border-gray-300 focus:border-primary">
+                            <option value="">-- Select Type --</option>
+                            <option value="Problem" class="text-danger">Problem (Threat)</option>
+                            <option value="Advantage" class="text-yellow-600">Advantage (Opportunity)</option>
+                        </select>
+                    </div>
+
+                    <!-- Owner -->
+                    <div>
+                        <label class="block font-semibold mb-1 text-sm font-poppins">Action Owner</label>
+                        <input type="text" name="owner" placeholder="E.g., Jane D. (Self/Team Member)"
+                               class="w-full p-2 border rounded-lg font-lora border-gray-300 focus:border-primary">
+                    </div>
+                </div>
+
+                <!-- Description -->
+                <div class="mt-4">
+                    <label class="block font-semibold mb-1 text-sm font-poppins">Issue Description (The Situation and Impact)</label>
+                    <textarea name="description" rows="2" placeholder="E.g., The vendor missed the delivery deadline, delaying our testing phase by 3 days."
+                              class="w-full p-2 border rounded-lg font-lora border-gray-300 focus:border-primary"></textarea>
+                </div>
+
+                <!-- Action Plan -->
+                <div class="mt-4">
+                    <label class="block font-semibold mb-1 text-sm font-poppins">Action to be Taken (Adapt, Shift, Improve, or Capture)</label>
+                    <input type="text" name="action" placeholder="E.g., Shift the schedule and assign a junior tester to mediate the vendor relationship."
+                           class="w-full p-2 border rounded-lg font-lora border-gray-300 focus:border-primary">
+                </div>
+                
+                <!-- Status -->
+                <input type="hidden" name="status" value="Identified">
+
+                <button type="submit" class="w-full mt-6 bg-danger text-white p-3 rounded-lg font-poppins font-bold hover:bg-danger/90 transition-colors shadow-md">
+                    Log Issue and Define Action
+                </button>
+            </form>
+
+            <!-- Issue Register Table -->
+            <div class="mt-8 overflow-x-auto shadow-lg rounded-lg border border-gray-300 bg-white">
+                <table class="min-w-full divide-y divide-gray-200">
+                    <thead class="bg-dark/10">
+                        <tr>
+                            <th class="p-3 text-left text-xs font-bold text-dark uppercase tracking-wider font-poppins">Type</th>
+                            <th class="p-3 text-left text-xs font-bold text-dark uppercase tracking-wider font-poppins">Description</th>
+                            <th class="p-3 text-left text-xs font-bold text-dark uppercase tracking-wider font-poppins">Action Plan</th>
+                            <th class="p-3 text-left text-xs font-bold text-dark uppercase tracking-wider font-poppins">Owner</th>
+                            <th class="p-3 text-left text-xs font-bold text-dark uppercase tracking-wider font-poppins">Status / Options</th>
+                        </tr>
+                    </thead>
+                    <tbody id="issueRegisterBody" class="divide-y divide-gray-200">
+                        <!-- Issue rows will be rendered here by JavaScript -->
+                    </tbody>
+                </table>
+            </div>
+        </section>
+
+        <!-- Conclusion Footer -->
+        <div class="mt-10 grid grid-cols-1 md:grid-cols-2 gap-6">
+
+            <!-- Card 1: Takeaways Section -->
+            <div class="module-card bg-dark text-white border-t-4 border-primary">
+                <h2 class="text-2xl font-bold mb-4 font-poppins">Key Takeaways for Confident Resolution</h2> <!-- SECONDARY FONT: POPPINS -->
+                <ul class="list-disc ml-6 text-lg space-y-2 font-lora"> <!-- PRIMARY FONT: LORA -->
+                    <li><strong>Issue Defined:</strong> A Situation that is <strong>Certain</strong> and has a clear Impact on your objectives.</li>
+                    <li><strong>Dual Focus:</strong> Successful leadership means managing both <strong>Problems</strong> (negative) and <strong>Advantages</strong> (positive).</li>
+                    <li><strong>Streamlined Action:</strong> Your only two targets are the <strong>Source</strong> (Situation) or the <strong>Consequence</strong> (Impact).</li>
+                </ul>
+            </div>
+            <!-- END Takeaways Section -->
+
+
+            <!-- Card 2: CTA CHECKLIST SECTION -->
+            <div class="module-card bg-light-branded text-dark border-t-4 border-danger shadow-inner">
+                <h3 class="font-poppins text-xl font-extrabold mb-4 text-center">3-Step Completion Checklist</h3> <!-- SECONDARY FONT: POPPINS -->
+                
+                <ol class="space-y-4 font-lora text-base px-2"> <!-- PRIMARY FONT: LORA -->
+                    <li class="flex items-start">
+                        <span class="text-2xl font-bold text-primary mr-3">1.</span>
+                        <div>
+                            <strong>FINISH CONTENT:</strong> Ensure all activities on this interactive website have been reviewed and completed.
+                        </div>
+                    </li>
+                    <li class="flex items-start">
+                        <span class="text-2xl font-bold text-primary mr-3">2.</span>
+                        <div>
+                            <strong>RETURN TO LiL:</strong> Click the button below to navigate back to the LinkedIn Learning platform window.
+                        </div>
+                    </li>
+                    <li class="flex items-start">
+                        <span class="text-2xl font-bold text-danger mr-3">3.</span>
+                        <div>
+                            <strong>CLICK "MARK AS COMPLETE"</strong>: On the LiL page, click the "Mark as Complete" button at the top of the content player to finalize your status.
+                        </div>
+                    </li>
+                </ol>
+
+                <div class="mt-6 pt-4 border-t border-gray-300 text-center">
+                    <a href="#" onclick="alert('Please navigate back to your LinkedIn Learning module page to confirm completion.')" 
+                       class="inline-flex items-center bg-primary text-dark font-poppins font-bold py-3 px-6 rounded-lg uppercase tracking-wider hover:bg-primary/80 transition-colors shadow-md text-sm">
+                       <svg class="w-5 h-5 mr-2" fill="currentColor" viewBox="0 0 20 20"><path d="M10 18a8 8 0 100-16 8 8 0 000 16zm3.707-9.293a1 1 0 00-1.414-1.414L9 10.586 7.707 9.293a1 1 0 00-1.414 1.414l2 2a1 1 0 001.414 0l4-4z"></path></svg>
+                        Mark Module as Complete on LinkedIn Learning
+                    </a>
+                </div>
+            </div>
+            <!-- END SEPARATE CTA CHECKLIST SECTION -->
+
+        </div>
+        <!-- END Conclusion Footer -->
+
+    </div>
+</body>
+</html>
